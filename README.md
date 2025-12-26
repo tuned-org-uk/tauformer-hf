@@ -1,4 +1,4 @@
-# nanochat-rs 🔥
+# nanoGPT-rs 🔥
 
 A GPT implementation in Rust using the [Burn](https://github.com/tracel-ai/burn) deep learning framework. This is a high-performance Rust port inspired by [Andrej Karpathy's nanochat](https://github.com/karpathy/nanochat), featuring modern transformer architecture with advanced optimizations.
 
