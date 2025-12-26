@@ -17,7 +17,7 @@ cargo run --example check_features --features wgpu -- --nocapture
 
 ## Overview
 
-nanochat-rs implements a decoder-only transformer with state-of-the-art features for efficient text generation. Built on Burn 0.18, it leverages Rust's performance and safety guarantees while providing GPU acceleration through multiple backends (WGPU, CUDA, CPU).
+nanogpt-rs implements a decoder-only transformer with state-of-the-art features for efficient text generation. Built on Burn 0.18, it leverages Rust's performance and safety guarantees while providing GPU acceleration through multiple backends (WGPU, CUDA, CPU).
 
 ## Architecture
 
@@ -170,7 +170,7 @@ src/
 
 ```rust
 use burn::tensor::{Int, Tensor};
-use nanochat::{
+use tauformer::{
     backend::{get_device, AutoBackend},
     config::nanochatConfig,
     gpt::GptModel,
@@ -205,7 +205,7 @@ let output = model.generate(input, 50);
 ### Streaming Generation with KV Cache
 
 ```rust
-use nanochat::engine::{Engine, KVCache};
+use tauformer::engine::{Engine, KVCache};
 
 let engine = Engine::new(model, device);
 
@@ -221,7 +221,7 @@ for next_token in engine.stream(input, 100) {
 ### Custom Sampling Policy
 
 ```rust
-use nanochat::sampling::{extract_last_logits, sample_with_policy, SamplingPolicy};
+use tauformer::sampling::{extract_last_logits, sample_with_policy, SamplingPolicy};
 
 let logits = model.forward(input, true);  // true = use softcap
 let last_logits = extract_last_logits(logits);
@@ -237,7 +237,7 @@ let next_token = sample_with_policy(
 ### Save/Load Checkpoints
 
 ```rust
-use nanochat::checkpoint::{save_checkpoint, load_checkpoint};
+use tauformer::checkpoint::{save_checkpoint, load_checkpoint};
 
 // Save
 save_checkpoint(&model, &cfg, "./checkpoints/model_v1")?;

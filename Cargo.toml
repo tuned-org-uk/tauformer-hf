@@ -1,13 +1,13 @@
 [package]
-name = "nanochat"
+name = "tauformer"
 version = "0.1.0"
 edition = "2024"
-description = "Nanochat in Rust"
+description = "A Transformer Architecture using arrowspace's taumode"
 authors = ["Lorenzo <tunedconsulting@gmail.com>"]
-license = "Apache-2.0"
-repository = "https://github.com/tuned-org-uk/nanochat-rs"
-homepage = "https://github.com/tuned-org-uk/nanochat-rs"
-documentation = "https://docs.rs/nanochat-rs"
+license = "Proprietary"
+repository = "https://github.com/tuned-org-uk/tauformer"
+homepage = "https://github.com/tuned-org-uk/tauformer"
+documentation = "https://docs.rs/tauformer"
 readme = "README.md"
 keywords = ["embeddings", "gpt", "llm"]
 categories = ["algorithms", "mathematics", "science"]
@@ -29,6 +29,7 @@ burn = { version = "0.18.0", default-features = false, features = ["std", "train
 burn-ndarray = { version = "0.18.0", optional = true }
 burn-wgpu = { version = "0.18.0", optional = true }
 burn-cuda = { version = "0.18.0", optional = true }
+arrowspace = { version = "0.24.6", features = ["storage"] }
 
 # Core dependencies
 #bincode = "2.0.0"
@@ -44,10 +45,16 @@ tokenizers = "0.22.1"
 env_logger = "0.11.8"
 log = "0.4.28"
 tempfile = "3.23.0"
+sprs = "0.11.4"
+parquet = { version = "57.0.0" }
+arrow = { version = "57.0.0" }
 
 # bpe-tokenizer = "0.1.4"
 # this is the rustbpe from the original nanochat
 # rustbpe = { path = "./rustbpe" }
+
+[dev-dependencies]
+approx = "0.5.1"
 
 [features]
 default = ["cpu"]
@@ -59,11 +66,11 @@ cuda = ["burn-cuda"]
 all-backends = ["cpu", "wgpu", "cuda"]
 
 [lib]
-name = "nanochat"
+name = "tauformer"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "nanochat"
+name = "tauformer"
 path = "src/main.rs"
 
 [profile.release]
@@ -78,5 +85,3 @@ opt-level = 1  # Faster dev builds
 [workspace]
 # dowload bpe from the original repo
 # rustbpe = "./rustbpe/"
-
-
