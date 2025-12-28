@@ -84,7 +84,7 @@ impl<B: Backend> Mlp<B> {
 pub struct TauBlock<B: Backend> {
     layer_idx: usize,
     ln1: LayerNorm<B>,
-    attn: TauModeAttention<B>,
+    pub(crate) attn: TauModeAttention<B>,
     ln2: LayerNorm<B>,
     mlp: Mlp<B>,
 }
@@ -144,18 +144,13 @@ impl<B: Backend> TauBlock<B> {
 #[derive(Module, Debug)]
 pub struct TauGptModel<B: Backend> {
     wte: Embedding<B>,
-    blocks: Vec<TauBlock<B>>,
+    pub(crate) blocks: Vec<TauBlock<B>>,
     lnf: LayerNorm<B>,
     lmhead: Linear<B>,
     cos: Tensor<B, 4>,
     sin: Tensor<B, 4>,
     nembd: usize,
     nlayer: usize,
-
-    // New sparse path (CPU-parallel, not a module param):
-    pub sparse_laplacian: Ignored<Option<Arc<CsMat<f64>>>>,
-
-    pub manifold_tau_mode: Ignored<Option<ManifoldTauMode>>,
 }
 
 impl<B: Backend> TauGptModel<B> {
@@ -217,8 +212,6 @@ impl<B: Backend> TauGptModel<B> {
             sin,
             nembd: cfg.n_embd,
             nlayer: cfg.n_layer,
-            sparse_laplacian: Ignored(Some(laplacian)),
-            manifold_tau_mode: Ignored(Some(tau_mode)),
         }
     }
 
@@ -226,6 +219,9 @@ impl<B: Backend> TauGptModel<B> {
         self.nlayer
     }
 
+    pub fn laplacian_dims(&self) -> usize {
+        self.blocks[0].clone().attn.get_laplacian_matrix().shape().0
+    }
     /// Full forward (prefill): idx [B,T] -> logits [B,T,V].
     pub fn forward(&self, idx: Tensor<B, 2, Int>, use_softcap: bool) -> Tensor<B, 3> {
         let [b, t] = idx.dims();

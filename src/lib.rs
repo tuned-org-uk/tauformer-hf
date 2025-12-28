@@ -53,24 +53,6 @@ pub fn init() {
     });
 }
 
-// pub mod tokenizer;
-// pub mod model {
-//     pub mod gpt;
-// }
-// pub mod engine;
-// pub mod sampling;
-// pub mod loss;
-// pub mod inference;
-
-// // Re-export commonly used types
-// pub use backend::{AutoBackend, get_device, print_backend_info, is_gpu_available};
-// pub use config::NanoChatConfig;
-// pub use tokenizer::{NanoChatTokenizer, ChatMessage, ConversationBuilder};
-// pub use model::gpt::GptModel;
-// pub use engine::{Engine, KVCache};
-// pub use sampling::sample_next_token;
-// pub use loss::{language_modeling_loss, next_token_loss};
-
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{

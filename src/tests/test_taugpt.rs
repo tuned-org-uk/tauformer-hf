@@ -17,18 +17,28 @@ use std::path::Path;
 
 use crate::backend::AutoBackend;
 use crate::config::NanoChatConfig;
+use crate::pretraining::parquet::{DomainManifold, load_domain_manifold};
 use crate::taugpt::{TauGptModel, TauKVCache};
 
 type B = AutoBackend;
 
 // Path to your manifold parquet used by the sparse constructor.
+use rstest::fixture;
+use rstest::rstest;
+
 const MANIFOLD_PATH: &str = "./domain_manifold/manifold.parquet";
 
-// If the manifold is always 384x384 in your setup, keep this as a constant.
-// If you later support reading the dimension before building the config, this can be removed.
-const MANIFOLD_DIM: usize = 384;
+#[fixture]
+#[once]
+fn load_manifold_test() -> (DomainManifold, usize) {
+    let domain_manifold = load_domain_manifold(MANIFOLD_PATH).unwrap();
+    let manifold_dim = domain_manifold.nfeatures;
 
-fn cfg_sparse_native_single_head(manifold_dim: usize) -> NanoChatConfig {
+    (domain_manifold, manifold_dim)
+}
+
+fn cfg_sparse_native_single_head() -> NanoChatConfig {
+    let (_, manifold_dim) = load_manifold_test();
     NanoChatConfig {
         sequence_len: 16,
         vocab_size: 64,
@@ -44,15 +54,13 @@ fn cfg_sparse_native_single_head(manifold_dim: usize) -> NanoChatConfig {
     }
 }
 
-fn cfg_sparse_native_multihead(
-    manifold_dim: usize,
-    n_head: usize,
-    n_kv_head: usize,
-) -> NanoChatConfig {
+fn cfg_sparse_native_multihead(n_head: usize, n_kv_head: usize) -> NanoChatConfig {
     assert!(n_head >= 1);
     assert!(n_kv_head >= 1);
     assert!(n_kv_head <= n_head);
     assert!(n_head % n_kv_head == 0);
+
+    let (_, manifold_dim) = load_manifold_test();
 
     NanoChatConfig {
         sequence_len: 16,
@@ -71,18 +79,26 @@ fn cfg_sparse_native_multihead(
 }
 
 fn build_model(cfg: &NanoChatConfig, device: &<B as Backend>::Device) -> TauGptModel<B> {
+    let tau_mode = crate::pretraining::parquet::TauMode::Median;
+
+    let gpt = TauGptModel::<B>::new_with_sparse_laplacian(
+        cfg,
+        &Path::new(MANIFOLD_PATH),
+        device,
+        tau_mode,
+    );
+
     // In the "manifold-native" regime we always want head_dim == manifold_dim.
     // For multihead, this is enforced by cfg_sparse_native_multihead via n_embd = n_head * manifold_dim.
     let head_dim = cfg.n_embd / cfg.n_head;
     assert_eq!(cfg.n_embd % cfg.n_head, 0);
     assert_eq!(
-        head_dim, MANIFOLD_DIM,
+        head_dim,
+        gpt.laplacian_dims(),
         "Tests assume manifold-native head_dim == MANIFOLD_DIM"
     );
 
-    let tau_mode = crate::pretraining::parquet::TauMode::Median;
-
-    TauGptModel::<B>::new_with_sparse_laplacian(cfg, &Path::new(MANIFOLD_PATH), device, tau_mode)
+    gpt
 }
 
 fn assert_logits_finite(logits: &Tensor<B, 3>) {
@@ -140,16 +156,16 @@ fn run_forward_decode_equivalence(cfg: NanoChatConfig) {
     }
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_construction_sparse_native_single_head() {
-    let cfg = cfg_sparse_native_single_head(MANIFOLD_DIM);
+    let cfg = cfg_sparse_native_single_head();
     let device = <B as Backend>::Device::default();
     let _model = build_model(&cfg, &device);
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_forward_shape_and_finite_sparse_native_single_head() {
-    let cfg = cfg_sparse_native_single_head(MANIFOLD_DIM);
+    let cfg = cfg_sparse_native_single_head();
     let device = <B as Backend>::Device::default();
     let model = build_model(&cfg, &device);
 
@@ -166,9 +182,9 @@ fn test_taugpt_forward_shape_and_finite_sparse_native_single_head() {
     assert_logits_finite(&logits);
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_generation_determinism_sparse_native_single_head() {
-    let cfg = cfg_sparse_native_single_head(MANIFOLD_DIM);
+    let cfg = cfg_sparse_native_single_head();
     let device = <B as Backend>::Device::default();
     let model = build_model(&cfg, &device);
 
@@ -183,20 +199,20 @@ fn test_taugpt_generation_determinism_sparse_native_single_head() {
     assert_eq!(v1, v2, "Greedy generation should be deterministic");
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_forward_decode_matches_prefill_sparse_native_single_head() {
-    run_forward_decode_equivalence(cfg_sparse_native_single_head(MANIFOLD_DIM));
+    run_forward_decode_equivalence(cfg_sparse_native_single_head());
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_forward_decode_matches_prefill_sparse_native_multihead_no_mqa() {
     // Multihead, still manifold-native per head (head_dim == manifold_dim).
     // Keep heads small to avoid slowing unit tests too much.
-    run_forward_decode_equivalence(cfg_sparse_native_multihead(MANIFOLD_DIM, 2, 2));
+    run_forward_decode_equivalence(cfg_sparse_native_multihead(2, 2));
 }
 
-#[test]
+#[rstest]
 fn test_taugpt_forward_decode_matches_prefill_sparse_native_multihead_mqa() {
     // Multihead with MQA (n_head != n_kv_head), still manifold-native per head.
-    run_forward_decode_equivalence(cfg_sparse_native_multihead(MANIFOLD_DIM, 2, 1));
+    run_forward_decode_equivalence(cfg_sparse_native_multihead(2, 1));
 }

@@ -6,7 +6,7 @@
 //! - Convert |Δlambda| into attention logits and reuse the existing stable softmax pipeline.
 
 use burn::module::Param;
-use burn::tensor::{Bool, Shape, Tensor, activation, backend::Backend};
+use burn::tensor::{Bool, Tensor, activation, backend::Backend};
 use rayon::prelude::*;
 use sprs::CsMat;
 
