@@ -1,4 +1,3 @@
-
 // ═════════════════════════════════════════════════════════════════════════════
 // Tests
 // ═════════════════════════════════════════════════════════════════════════════
@@ -112,7 +111,11 @@ fn test_encode_with_bos() {
     let ids = tokenizer.encode_with_bos(text).expect("Encoding failed");
 
     assert!(!ids.is_empty());
-    assert_eq!(ids[0], tokenizer.get_bos_token_id(), "First token should be BOS");
+    assert_eq!(
+        ids[0],
+        tokenizer.get_bos_token_id(),
+        "First token should be BOS"
+    );
 }
 
 #[test]
@@ -151,7 +154,10 @@ fn test_chat_template_single_message() {
         .expect("Template application failed");
 
     // Should have: BOS + user_start + content + user_end
-    assert!(tokens.len() >= 3, "Should have BOS, start, content, end tokens");
+    assert!(
+        tokens.len() >= 3,
+        "Should have BOS, start, content, end tokens"
+    );
     assert_eq!(tokens[0], tokenizer.get_bos_token_id());
 }
 
@@ -246,7 +252,9 @@ fn test_encode_decode_batch() {
     assert_eq!(encoded.len(), 2);
 
     let ids_refs: Vec<&[u32]> = encoded.iter().map(|v| v.as_slice()).collect();
-    let decoded = tokenizer.decode_batch(&ids_refs).expect("Batch decode failed");
+    let decoded = tokenizer
+        .decode_batch(&ids_refs)
+        .expect("Batch decode failed");
     assert_eq!(decoded.len(), 2);
 }
 
@@ -320,4 +328,3 @@ fn test_special_token_map_completeness() {
     assert!(map.contains_key("<|python_start|>"));
     assert!(map.contains_key("<|output_end|>"));
 }
-

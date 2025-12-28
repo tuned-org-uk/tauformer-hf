@@ -39,7 +39,7 @@ impl XorShift64 {
 
 #[inline]
 fn sample_multinomial_row(probs: &[f32], rng: &mut XorShift64) -> usize {
-    let mut r = rng.next_f32();
+    let r = rng.next_f32();
     let mut cum = 0.0f32;
 
     for (i, &p) in probs.iter().enumerate() {
@@ -185,6 +185,9 @@ pub fn sample_with_policy<B: Backend>(
 
     match policy {
         Greedy => sample_greedy(logits_last),
+
+        // Enforce the guarantee: TopK(1) is exactly greedy.
+        TopK { k: 1 } => sample_greedy(logits_last),
 
         Temperature { t } => {
             let logits = apply_temperature(logits_last, t);

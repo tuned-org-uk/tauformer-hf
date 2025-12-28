@@ -184,7 +184,7 @@ impl<B: Backend> GptModel<B> for TauModel<B> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct Engine<B: Backend, M: GptModel<B>> {
-    model: M,
+    pub model: M,
     _device: B::Device,
 }
 

@@ -5,7 +5,8 @@
 //! - Compute lambda per token/head from vectors using a bounded Rayleigh quotient.
 //! - Convert |Δlambda| into attention logits and reuse the existing stable softmax pipeline.
 
-use burn::tensor::{Bool, Tensor, activation, backend::Backend};
+use burn::module::Param;
+use burn::tensor::{Bool, Shape, Tensor, activation, backend::Backend};
 use rayon::prelude::*;
 use sprs::CsMat;
 
@@ -70,7 +71,7 @@ pub fn laplacian_chain_dense<B: Backend>(d: usize, device: &B::Device) -> Featur
     }
 }
 
-/// Compute taumode lambda per token per head from head vectors.
+/// (Dense pathway) Compute taumode lambda per token per head from head vectors.
 ///
 /// Input: x [B, H, T, D]
 /// Output: lambda [B, H, T]
@@ -80,18 +81,21 @@ pub fn laplacian_chain_dense<B: Backend>(d: usize, device: &B::Device) -> Featur
 /// lambda = E_bounded   (first version; later you can blend in dispersion as in arrowspace)
 pub fn lambdas_from_heads<B: Backend>(
     x: Tensor<B, 4>,
-    lap: &FeatureLaplacian<B>,
+    lap: Param<Tensor<B, 2>>,
     cfg: &TauModeConfig,
 ) -> Tensor<B, 3> {
     let [b, h, t, d] = x.dims();
-    debug_assert_eq!(d, lap.dim(), "x last dim D must match Laplacian");
+    let [lr, lc] = lap.val().dims();
+
+    debug_assert_eq!(lr, d, "Laplacian rows must match head dim D");
+    debug_assert_eq!(lc, d, "Laplacian cols must match head dim D");
 
     // Flatten [B,H,T,D] -> [N,D]
     let n = b * h * t;
     let x_nd = x.reshape([n, d]);
 
     // y = x L  -> [N,D]
-    let y_nd = x_nd.clone().matmul(lap.matrix.clone());
+    let y_nd = x_nd.clone().matmul(lap.val());
 
     // numerator = sum_i x_i * (xL)_i
     let numerator = (x_nd.clone() * y_nd).sum_dim(1); // [N]

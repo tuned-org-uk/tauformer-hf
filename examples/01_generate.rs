@@ -1,5 +1,6 @@
 // examples/generate.rs
 use burn::tensor::{Int, Tensor};
+use std::path::Path;
 use tauformer::{
     backend::AutoBackend as B, causalattention::GptModel, config::NanoChatConfig, pretraining,
     taugpt::TauGptModel,
@@ -48,8 +49,8 @@ fn main() -> anyhow::Result<()> {
         // Pass CSR + tau_mode into your Tau GPT wiring (TauModeAttention keeps them as ignored fields).
         let model = TauGptModel::<B>::new_with_sparse_laplacian(
             &cfg,
+            &Path::new("./domain_manifold/manifold.parquet"),
             &device,
-            std::sync::Arc::new(domain.laplacian),
             domain.tau_mode,
         );
 

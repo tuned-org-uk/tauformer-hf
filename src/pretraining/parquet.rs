@@ -254,6 +254,26 @@ pub fn load_sparse_matrix(path: impl AsRef<Path>) -> Result<CsMat<f64>> {
     Ok(trimat.to_csr())
 }
 
+/// Convert CSR Laplacian (f64) to a dense Burn tensor (f32) shaped [D, D].
+pub fn laplacian_csr_to_dense_tensor<B: Backend>(
+    lap: &CsMat<f64>,
+    device: &B::Device,
+) -> Result<Tensor<B, 2>> {
+    let (r, c) = lap.shape();
+    anyhow::ensure!(r == c, "laplacian must be square, got {}x{}", r, c);
+
+    let d = r;
+    let mut dense = vec![0.0f32; d * d];
+
+    for (i, row) in lap.outer_iterator().enumerate() {
+        for (j, &v) in row.iter() {
+            dense[i * d + j] = v as f32;
+        }
+    }
+
+    Ok(Tensor::<B, 1>::from_floats(dense.as_slice(), device).reshape([d, d]))
+}
+
 fn get_u64_scalar(batch: &RecordBatch, col_name: &str) -> Result<u64> {
     let col = batch
         .column_by_name(col_name)
@@ -261,35 +281,6 @@ fn get_u64_scalar(batch: &RecordBatch, col_name: &str) -> Result<u64> {
         .with_context(|| format!("{} column missing or wrong type", col_name))?;
     anyhow::ensure!(col.len() > 0, "{} column is empty", col_name);
     Ok(col.value(0))
-}
-
-pub fn load_manifold_laplacian_for_head_dim<B: Backend>(
-    parquet_path: impl AsRef<Path>,
-    head_dim: usize,
-    _device: &B::Device,
-) -> anyhow::Result<CsMat<f64>> {
-    // Loads both manifold.parquet (CSR Laplacian) and manifold.json metadata. [file:44]
-    let domain = load_domain_manifold(parquet_path.as_ref())?;
-
-    anyhow::ensure!(head_dim > 0, "head_dim must be > 0");
-    anyhow::ensure!(
-        domain.nfeatures == head_dim,
-        "manifold nfeatures={} must match head_dim={}",
-        domain.nfeatures,
-        head_dim
-    );
-
-    let lap = domain.laplacian;
-    anyhow::ensure!(
-        lap.rows() == head_dim && lap.cols() == head_dim,
-        "laplacian shape mismatch: got {}x{}, expected {}x{}",
-        lap.rows(),
-        lap.cols(),
-        head_dim,
-        head_dim
-    );
-
-    Ok(lap)
 }
 
 #[cfg(test)]

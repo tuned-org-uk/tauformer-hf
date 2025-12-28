@@ -5,11 +5,12 @@
 //! but the per-layer cache stores (V, lambda_k) as defined by TauModeAttention.
 
 use burn::{
-    module::Module,
+    module::{Ignored, Module},
     nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
     tensor::{Int, Tensor, activation, backend::Backend},
 };
 use log::{debug, info};
+use std::path::Path;
 
 use crate::causalattention::rms_norm;
 use crate::config::NanoChatConfig;
@@ -93,17 +94,15 @@ impl<B: Backend> TauBlock<B> {
         cfg: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian: Arc<CsMat<f64>>,
-        tau_mode: ManifoldTauMode,
+        laplacian: &CsMat<f64>,
+        tau_mode: crate::pretraining::parquet::TauMode,
     ) -> Self {
         info!("Initializing TauBlock {} (sparse laplacian)", layer_idx);
 
         Self {
             layer_idx,
             ln1: LayerNormConfig::new(cfg.n_embd).init(device),
-            attn: TauModeAttention::new_with_sparse_laplacian(
-                cfg, layer_idx, device, laplacian, tau_mode,
-            ),
+            attn: TauModeAttention::new_with_laplacian(cfg, layer_idx, device, laplacian, tau_mode),
             ln2: LayerNormConfig::new(cfg.n_embd).init(device),
             mlp: Mlp::new(cfg, device),
         }
@@ -152,19 +151,26 @@ pub struct TauGptModel<B: Backend> {
     sin: Tensor<B, 4>,
     nembd: usize,
     nlayer: usize,
+
+    // New sparse path (CPU-parallel, not a module param):
+    pub sparse_laplacian: Ignored<Option<Arc<CsMat<f64>>>>,
+
+    pub manifold_tau_mode: Ignored<Option<ManifoldTauMode>>,
 }
 
 impl<B: Backend> TauGptModel<B> {
     /// Build TauGPT with an externally provided Laplacian (dense [head_dim, head_dim]).
     pub fn new_with_sparse_laplacian(
         cfg: &NanoChatConfig,
+        laplacian_path: &Path,
         device: &B::Device,
-        laplacian: Arc<CsMat<f64>>, // CSR L = D - A from ArrowSpace [file:44]
-        tau_mode: ManifoldTauMode,  // from manifold.json [file:44]
+        tau_mode: ManifoldTauMode, // from manifold.json [file:44]
     ) -> Self {
         info!("Initializing TauGptModel (sparse laplacian)");
 
         let head_dim = cfg.n_embd / cfg.n_head;
+        let laplacian = crate::pretraining::parquet::load_sparse_matrix(laplacian_path).unwrap();
+
         assert!(laplacian.rows() == head_dim);
         assert!(
             laplacian.rows() == laplacian.cols(),
@@ -185,13 +191,6 @@ impl<B: Backend> TauGptModel<B> {
 
         let wte = EmbeddingConfig::new(cfg.vocab_size, cfg.n_embd).init(device);
 
-        // Each layer shares the same manifold Laplacian + tau selection policy. [file:44]
-        let blocks = (0..cfg.n_layer)
-            .map(|i| {
-                TauBlock::new_with_sparse_laplacian(cfg, i, device, laplacian.clone(), tau_mode)
-            })
-            .collect::<Vec<_>>();
-
         let lnf = LayerNormConfig::new(cfg.n_embd).init(device);
 
         let init = burn::nn::Initializer::KaimingUniform {
@@ -205,15 +204,21 @@ impl<B: Backend> TauGptModel<B> {
 
         info!("TauGptModel (sparse) initialization complete");
 
+        let laplacian = Arc::new(laplacian);
         Self {
             wte,
-            blocks,
+            // Each layer shares the same manifold Laplacian + tau selection policy.
+            blocks: (0..cfg.n_layer)
+                .map(|i| TauBlock::new_with_sparse_laplacian(cfg, i, device, &laplacian, tau_mode))
+                .collect::<Vec<_>>(),
             lnf,
             lmhead,
             cos,
             sin,
             nembd: cfg.n_embd,
             nlayer: cfg.n_layer,
+            sparse_laplacian: Ignored(Some(laplacian)),
+            manifold_tau_mode: Ignored(Some(tau_mode)),
         }
     }
 

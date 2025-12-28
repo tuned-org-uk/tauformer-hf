@@ -1,5 +1,6 @@
 use crate::backend::AutoBackend;
 use crate::taumode::*;
+use burn::module::Param;
 use burn::tensor::Tensor;
 
 type TestBackend = AutoBackend;
@@ -55,7 +56,11 @@ fn test_lambdas_from_heads_shape() {
     let lap = laplacian_chain_dense::<TestBackend>(d, &device);
     let cfg = TauModeConfig::default();
 
-    let lambdas = lambdas_from_heads(x, &lap, &cfg);
+    let lambdas = lambdas_from_heads(
+        x,
+        Param::from_tensor(lap.matrix).set_require_grad(false),
+        &cfg,
+    );
 
     assert_eq!(lambdas.dims(), [b, h, t]);
 }
@@ -78,7 +83,11 @@ fn test_lambdas_bounded_range() {
         temperature: 1.0,
     };
 
-    let lambdas = lambdas_from_heads(x, &lap, &cfg);
+    let lambdas = lambdas_from_heads(
+        x,
+        Param::from_tensor(lap.matrix).set_require_grad(false),
+        &cfg,
+    );
     let data: Vec<f32> = lambdas.to_data().to_vec().unwrap();
 
     for &val in data.iter() {

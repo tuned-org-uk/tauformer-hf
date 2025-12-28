@@ -1,5 +1,5 @@
 //! Taumode attention: uses feature-space Laplacian to compress tokens into scalar lambdas,
-//! then scores via lambda-distance instead of QK^T.
+//! then scores via lambda-distance instead of softmax(QK).
 
 use burn::{
     module::{Ignored, Module, Param},
@@ -9,16 +9,11 @@ use burn::{
 };
 use log::{debug, info};
 
-use crate::causalattention::rms_norm;
 use crate::config::NanoChatConfig;
 use crate::rope::{apply_rotary_emb, apply_rotary_emb_step};
-use crate::taumode::{
-    FeatureLaplacian, TauModeConfig, mqa_expand_heads_4, taumode_distance_logits,
-};
+use crate::taumode::{TauModeConfig, mqa_expand_heads_4, taumode_distance_logits};
+use crate::{causalattention::rms_norm, pretraining::parquet::TauMode};
 use sprs::CsMat;
-use std::sync::Arc;
-
-use crate::pretraining::parquet::TauMode as ManifoldTauMode;
 
 /// taumode attention layer cache: stores (V, lambda_k) only.
 pub type TauCacheLayer<B> = Option<(Tensor<B, 4>, Tensor<B, 3>)>;
@@ -26,6 +21,8 @@ pub type TauCacheLayer<B> = Option<(Tensor<B, 4>, Tensor<B, 3>)>;
 /// taumode attention module.
 #[derive(Module, Debug)]
 pub struct TauModeAttention<B: Backend> {
+    manifold_dim: usize,
+
     pub(crate) layer_idx: usize,
     pub(crate) nhead: usize,
     pub(crate) nkv_head: usize,
@@ -42,17 +39,14 @@ pub struct TauModeAttention<B: Backend> {
     qk_norm_k: LayerNorm<B>,
 
     // Store Laplacian matrix directly as a parameter (will be saved/loaded)
-    laplacian_matrix: Param<Tensor<B, 2>>,
+    laplacian_tensor: Option<Param<Tensor<B, 2>>>, // using dense
+    laplacian_matrix: Ignored<Option<CsMat<f64>>>, // using sparse
 
+    pub(crate) tau_mode: Ignored<Option<TauMode>>,
     // Store tau config as plain fields (not Module members)
     pub(crate) tau: f32,
     pub(crate) eps: f32,
     pub(crate) temperature: f32,
-
-    // New sparse path (CPU-parallel, not a module param):
-    pub sparse_laplacian: Ignored<Option<Arc<CsMat<f64>>>>,
-
-    pub manifold_tau_mode: Ignored<Option<ManifoldTauMode>>,
 }
 
 impl<B: Backend> TauModeAttention<B> {
@@ -72,6 +66,10 @@ impl<B: Backend> TauModeAttention<B> {
             "Layer {} TauAttn: nhead={}, nkv_head={}, head_dim={}",
             layer_idx, nhead, nkv_head, head_dim
         );
+        debug!(
+            "Layer {} TauAttn: config n_embd={}, n_head={}, n_kv_head={}, computed head_dim={}",
+            layer_idx, nembd, nhead, nkv_head, head_dim
+        );
 
         let init = burn::nn::Initializer::KaimingUniform {
             gain: 0.5,
@@ -89,8 +87,14 @@ impl<B: Backend> TauModeAttention<B> {
             tau_config.tau,
             tau_config.temperature
         );
+        debug!(
+            "Layer {} TauAttn: dense laplacian tensor dims={:?}",
+            layer_idx,
+            laplacian.matrix.dims()
+        );
 
         Self {
+            manifold_dim: head_dim,
             layer_idx,
             nhead,
             nkv_head,
@@ -114,56 +118,111 @@ impl<B: Backend> TauModeAttention<B> {
             qk_norm_q: LayerNormConfig::new(head_dim).init(device),
             qk_norm_k: LayerNormConfig::new(head_dim).init(device),
             // Store as Param so it gets saved/loaded but not trained
-            laplacian_matrix: Param::from_tensor(laplacian.matrix).set_require_grad(false),
+            laplacian_tensor: Some(Param::from_tensor(laplacian.matrix).set_require_grad(false)),
+            laplacian_matrix: Ignored(None),
+            tau_mode: Ignored(Some(TauMode::Median)),
             // Store config scalars directly
             tau: tau_config.tau,
             eps: tau_config.eps,
             temperature: tau_config.temperature,
-            sparse_laplacian: Ignored(None),
-            manifold_tau_mode: Ignored(None),
         }
-    }
-
-    fn clear_sparse(mut self) -> Self {
-        self.sparse_laplacian = Ignored(None);
-        self.manifold_tau_mode = Ignored(None);
-        self
     }
 
     pub fn new_with_laplacian(
         config: &NanoChatConfig,
         layer_idx: usize,
         device: &B::Device,
-        laplacian_dd: Tensor<B, 2>,
+        laplacian: &CsMat<f64>,
+        tau_mode: TauMode,
     ) -> Self {
-        let mut this = Self::new(config, layer_idx, device).clear_sparse();
-        this.laplacian_matrix = Param::from_tensor(laplacian_dd).set_require_grad(false);
-        this
-    }
+        assert_eq!(
+            laplacian.rows(),
+            laplacian.cols(),
+            "manifold Laplacian must be square"
+        );
+        info!(
+            "Layer {} TauAttn: new_with_laplacian using sparse laplacian rows={} cols={} nnz={} tau_mode={:?}",
+            layer_idx,
+            laplacian.rows(),
+            laplacian.cols(),
+            laplacian.nnz(),
+            tau_mode
+        );
 
-    pub fn new_with_sparse_laplacian(
-        config: &NanoChatConfig,
-        layer_idx: usize,
-        device: &B::Device,
-        laplacian: Arc<CsMat<f64>>, // CSR L = D - A [file:44]
-        tau_mode: ManifoldTauMode,  // from manifold.json [file:44]
-    ) -> Self {
         let mut this = Self::new(config, layer_idx, device);
-        this.sparse_laplacian = Ignored(Some(laplacian));
-        this.manifold_tau_mode = Ignored(Some(tau_mode));
-        // Keep laplacian_matrix as-is (unused in sparse path).
+
+        debug!(
+            "Layer {} TauAttn: switching from dense laplacian to sparse laplacian (dense Param will be None)",
+            layer_idx
+        );
+        this.manifold_dim = laplacian.rows();
+        this.laplacian_matrix = Ignored(Some(laplacian.clone()));
+        this.laplacian_tensor = None;
+        this.tau_mode = Ignored(Some(tau_mode));
+
+        debug!(
+            "Layer {} TauAttn: laplacian_matrix set? {} laplacian_tensor set? {}",
+            layer_idx,
+            this.laplacian_matrix.0.is_some(),
+            this.laplacian_tensor.is_some()
+        );
+
         this
     }
 
-    // Helper to reconstruct FeatureLaplacian on the fly
-    pub fn get_laplacian(&self) -> FeatureLaplacian<B> {
-        FeatureLaplacian {
-            matrix: self.laplacian_matrix.val(),
+    // Helper to access the matrix if set
+    pub fn get_laplacian_matrix(&self) -> &CsMat<f64> {
+        debug!(
+            "Layer {} TauAttn: get_laplacian_matrix called (is_some={})",
+            self.layer_idx,
+            self.laplacian_matrix.0.is_some()
+        );
+
+        if self.laplacian_matrix.0.as_ref().is_none() {
+            panic!("Called for laplacian matrix sparse version but it is not set")
         }
+
+        let lap = self.laplacian_matrix.0.as_ref().unwrap();
+        debug!(
+            "Layer {} TauAttn: sparse laplacian dims=({},{}) nnz={}",
+            self.layer_idx,
+            lap.rows(),
+            lap.cols(),
+            lap.nnz()
+        );
+
+        lap
+    }
+
+    // Helper to access the tensor if set
+    pub fn get_laplacian_tensor(&self) -> &Param<Tensor<B, 2>> {
+        debug!(
+            "Layer {} TauAttn: get_laplacian_tensor called (is_some={})",
+            self.layer_idx,
+            self.laplacian_tensor.is_some()
+        );
+
+        if self.laplacian_tensor.as_ref().is_none() {
+            panic!("Called for laplacian matrix sparse version but it is not set")
+        }
+
+        let lap = self.laplacian_tensor.as_ref().unwrap();
+        debug!(
+            "Layer {} TauAttn: dense laplacian dims={:?}",
+            self.layer_idx,
+            lap.val().dims()
+        );
+
+        lap
     }
 
     // Helper to reconstruct TauModeConfig on the fly
     pub fn get_tau_config(&self) -> TauModeConfig {
+        debug!(
+            "Layer {} TauAttn: get_tau_config tau={} eps={} temperature={}",
+            self.layer_idx, self.tau, self.eps, self.temperature
+        );
+
         TauModeConfig {
             tau: self.tau,
             eps: self.eps,
@@ -173,17 +232,40 @@ impl<B: Backend> TauModeAttention<B> {
 
     fn lambdas_from_heads_any(&self, heads: Tensor<B, 4>) -> Tensor<B, 3> {
         let tau_cfg = self.get_tau_config();
+        let [b, h, t, d] = heads.dims();
 
-        if let Some(lap) = self.sparse_laplacian.0.as_ref() {
+        debug!(
+            "Layer {} TauAttn: lambdas_from_heads_any heads dims [B={},H={},T={},D={}]",
+            self.layer_idx, b, h, t, d
+        );
+
+        if let Some(lap) = self.laplacian_matrix.0.as_ref() {
             let mode = self
-                .manifold_tau_mode
+                .tau_mode
                 .0
                 .unwrap_or(crate::pretraining::parquet::TauMode::Median);
 
-            crate::taumode::lambdas_from_heads_sparse::<B>(heads, lap.as_ref(), mode, tau_cfg.eps)
+            info!(
+                "Layer {} TauAttn: computing lambdas via SPARSE laplacian rows={} cols={} nnz={} mode={:?} eps={}",
+                self.layer_idx,
+                lap.rows(),
+                lap.cols(),
+                lap.nnz(),
+                mode,
+                tau_cfg.eps
+            );
+
+            crate::taumode::lambdas_from_heads_sparse::<B>(heads, lap, mode, tau_cfg.eps)
         } else {
-            let laplacian = self.get_laplacian();
-            crate::taumode::lambdas_from_heads::<B>(heads, &laplacian, &tau_cfg)
+            let lap = self.get_laplacian_tensor().clone();
+            let [lr, lc] = lap.val().dims();
+
+            info!(
+                "Layer {} TauAttn: computing lambdas via DENSE laplacian dims=({},{}) tau={} eps={} temperature={}",
+                self.layer_idx, lr, lc, tau_cfg.tau, tau_cfg.eps, tau_cfg.temperature
+            );
+
+            crate::taumode::lambdas_from_heads::<B>(heads, lap, &tau_cfg)
         }
     }
 
@@ -197,6 +279,12 @@ impl<B: Backend> TauModeAttention<B> {
         debug!(
             "Layer {} TauAttn forward: input (B, T, C) = ({}, {}, {})",
             self.layer_idx, b, t, c
+        );
+        debug!(
+            "Layer {} TauAttn forward: cache-less full attention path, tau_mode={:?}, using_sparse_lap={}",
+            self.layer_idx,
+            self.tau_mode.0,
+            self.laplacian_matrix.0.is_some()
         );
 
         // Project Q, K, V
@@ -217,13 +305,36 @@ impl<B: Backend> TauModeAttention<B> {
             .clamp(-5.0, 5.0)
             .reshape([b, t, self.nkv_head, self.head_dim]);
 
+        debug!(
+            "Layer {} TauAttn forward: projected Q/K/V (pre-swap) dims Q={:?}, K={:?}, V={:?}",
+            self.layer_idx,
+            q.dims(),
+            k.dims(),
+            v.dims()
+        );
+
         // (B, T, H, D) → (B, H, T, D)
         let q = q.swap_dims(1, 2);
         let k = k.swap_dims(1, 2);
         let v = v.swap_dims(1, 2);
 
+        debug!(
+            "Layer {} TauAttn forward: after swap dims Q={:?}, K={:?}, V={:?}",
+            self.layer_idx,
+            q.dims(),
+            k.dims(),
+            v.dims()
+        );
+
         // Apply RoPE
         let (cos, sin) = cos_sin;
+        debug!(
+            "Layer {} TauAttn forward: RoPE cos dims={:?} sin dims={:?}",
+            self.layer_idx,
+            cos.dims(),
+            sin.dims()
+        );
+
         let q = apply_rotary_emb(q, cos, sin);
         let k = apply_rotary_emb(k, cos, sin);
 
@@ -242,8 +353,20 @@ impl<B: Backend> TauModeAttention<B> {
         // taumode attention
         let y = self.scaled_tau_attention(q, k, v, t, t);
 
+        debug!(
+            "Layer {} TauAttn forward: scaled_tau_attention output dims={:?}",
+            self.layer_idx,
+            y.dims()
+        );
+
         // (B, H, T, D) → (B, T, C)
         let y = y.swap_dims(1, 2).reshape([b, t, c]);
+        debug!(
+            "Layer {} TauAttn forward: output reshaped to (B,T,C) dims={:?}",
+            self.layer_idx,
+            y.dims()
+        );
+
         self.c_proj.forward(y)
     }
 
@@ -256,6 +379,15 @@ impl<B: Backend> TauModeAttention<B> {
     ) -> Tensor<B, 3> {
         let [b, tq, c] = x_step.dims();
         debug_assert_eq!(tq, 1);
+
+        debug!(
+            "Layer {} TauAttn decode: x_step dims [B={},Tq={},C={}] cache_present={}",
+            self.layer_idx,
+            b,
+            tq,
+            c,
+            cache_layer.is_some()
+        );
 
         // Project Q, K, V
         let q = self
@@ -279,8 +411,23 @@ impl<B: Backend> TauModeAttention<B> {
             .reshape([b, 1, self.nkv_head, self.head_dim])
             .swap_dims(1, 2); // [B, Hkv, 1, D]
 
+        debug!(
+            "Layer {} TauAttn decode: projected step Q={:?}, K_new={:?}, V_new={:?}",
+            self.layer_idx,
+            q.dims(),
+            k_new.dims(),
+            v_new.dims()
+        );
+
         // Apply RoPE for *this* absolute position (stepwise)
         let (cos_step, sin_step) = cos_sin_step;
+        debug!(
+            "Layer {} TauAttn decode: RoPE step cos dims={:?} sin dims={:?}",
+            self.layer_idx,
+            cos_step.dims(),
+            sin_step.dims()
+        );
+
         let q = apply_rotary_emb_step(q, cos_step, sin_step);
         let k_new = apply_rotary_emb_step(k_new, cos_step, sin_step);
 
@@ -288,24 +435,75 @@ impl<B: Backend> TauModeAttention<B> {
         let q = rms_norm(q, 1e-6);
         let k_new = rms_norm(k_new, 1e-6);
 
+        debug!(
+            "Layer {} TauAttn decode: after RoPE+norm Q={:?}, K_new={:?}",
+            self.layer_idx,
+            q.dims(),
+            k_new.dims()
+        );
+
         // Compute lambda_k for this step
         let lambda_k_new = self.lambdas_from_heads_any(k_new); // [B, Hkv, 1]
+        debug!(
+            "Layer {} TauAttn decode: lambda_k_new dims={:?}",
+            self.layer_idx,
+            lambda_k_new.dims()
+        );
 
         // Cache management
         let (v_full, lambda_k_full) = match cache_layer.take() {
-            Some((v_all, lk_all)) => (
-                Tensor::cat(vec![v_all, v_new.clone()], 2), // time axis
-                Tensor::cat(vec![lk_all, lambda_k_new.clone()], 2), // time axis
-            ),
-            None => (v_new.clone(), lambda_k_new.clone()),
+            Some((v_all, lk_all)) => {
+                let t_prev = v_all.dims()[2];
+                debug!(
+                    "Layer {} TauAttn decode: appending to cache (prev Tk={} -> new Tk={})",
+                    self.layer_idx,
+                    t_prev,
+                    t_prev + 1
+                );
+                (
+                    Tensor::cat(vec![v_all, v_new.clone()], 2), // time axis
+                    Tensor::cat(vec![lk_all, lambda_k_new.clone()], 2), // time axis
+                )
+            }
+            None => {
+                debug!(
+                    "Layer {} TauAttn decode: initializing cache (Tk=1)",
+                    self.layer_idx
+                );
+                (v_new.clone(), lambda_k_new.clone())
+            }
         };
+
+        debug!(
+            "Layer {} TauAttn decode: cache tensors dims V_full={:?}, lambda_k_full={:?}",
+            self.layer_idx,
+            v_full.dims(),
+            lambda_k_full.dims()
+        );
 
         *cache_layer = Some((v_full.clone(), lambda_k_full.clone()));
 
         let tk = v_full.dims()[2];
+        debug!(
+            "Layer {} TauAttn decode: calling scaled_tau_attention_decode tq=1 tk={}",
+            self.layer_idx, tk
+        );
+
         let y = self.scaled_tau_attention_decode(q, lambda_k_full, v_full, 1, tk);
 
+        debug!(
+            "Layer {} TauAttn decode: scaled_tau_attention_decode output dims={:?}",
+            self.layer_idx,
+            y.dims()
+        );
+
         let y = y.swap_dims(1, 2).reshape([b, 1, c]);
+        debug!(
+            "Layer {} TauAttn decode: output reshaped to (B,1,C) dims={:?}",
+            self.layer_idx,
+            y.dims()
+        );
+
         self.c_proj.forward(y)
     }
 
@@ -319,8 +517,22 @@ impl<B: Backend> TauModeAttention<B> {
     ) -> Tensor<B, 4> {
         let [b, _hq, _, _d] = q.dims();
 
+        debug!(
+            "Layer {} TauAttn: scaled_tau_attention enter tq={} tk={} Q={:?} K={:?} V={:?}",
+            self.layer_idx,
+            tq,
+            tk,
+            q.dims(),
+            k.dims(),
+            v.dims()
+        );
+
         // Expand only V for the weighted sum (MQA); keep K unexpanded for lambda_k.
         let v = if self.nhead != self.nkv_head {
+            debug!(
+                "Layer {} TauAttn: MQA expand V (nhead={} nkv_head={})",
+                self.layer_idx, self.nhead, self.nkv_head
+            );
             mqa_expand_heads_4(v, self.nhead, self.nkv_head)
         } else {
             v
@@ -332,22 +544,54 @@ impl<B: Backend> TauModeAttention<B> {
         let lambda_q = self.lambdas_from_heads_any(q); // [B, Hq, Tq,] -> [B, Hq, Tq]
         let lambda_k = self.lambdas_from_heads_any(k); // [B, Hkv, Tk,] -> [B, Hkv, Tk]
 
+        debug!(
+            "Layer {} TauAttn: lambdas computed lambda_q={:?}, lambda_k={:?}",
+            self.layer_idx,
+            lambda_q.dims(),
+            lambda_k.dims()
+        );
+
         // If MQA: expand lambda_k (not K) to match nhead.
         let lambda_k = if self.nhead != self.nkv_head {
+            debug!(
+                "Layer {} TauAttn: MQA expand lambda_k (nhead={} nkv_head={})",
+                self.layer_idx, self.nhead, self.nkv_head
+            );
             crate::taumode::mqa_expand_heads_3(lambda_k, self.nhead, self.nkv_head)
         } else {
             lambda_k
         };
 
+        debug!(
+            "Layer {} TauAttn: lambda_k after possible expand dims={:?}",
+            self.layer_idx,
+            lambda_k.dims()
+        );
+
         // Build attention logits
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);
+        debug!(
+            "Layer {} TauAttn: att logits dims={:?} (before causal mask)",
+            self.layer_idx,
+            att.dims()
+        );
 
         // Causal mask
         let diag = (tk as i64) - (tq as i64);
         let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
+        let mask_2d_dims = mask_2d.dims(); // used by loggings
         let mask_4d = mask_2d
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.nhead, tq, tk]);
+
+        debug!(
+            "Layer {} TauAttn: mask dims mask_2d={:?} mask_4d={:?} diag={}",
+            self.layer_idx,
+            mask_2d_dims,
+            mask_4d.dims(),
+            diag
+        );
+
         att = att.mask_fill(mask_4d, -1.0e9);
 
         // Stable softmax
@@ -355,8 +599,20 @@ impl<B: Backend> TauModeAttention<B> {
         att = att - att_max.unsqueeze_dim::<4>(3);
         let att = activation::softmax(att, 3);
 
+        debug!(
+            "Layer {} TauAttn: att probs dims={:?} (after softmax)",
+            self.layer_idx,
+            att.dims()
+        );
+
         // Weighted sum
-        att.matmul(v)
+        let out = att.matmul(v);
+        debug!(
+            "Layer {} TauAttn: weighted sum output dims={:?}",
+            self.layer_idx,
+            out.dims()
+        );
+        out
     }
 
     fn scaled_tau_attention_decode(
@@ -369,8 +625,22 @@ impl<B: Backend> TauModeAttention<B> {
     ) -> Tensor<B, 4> {
         let [b, _hq, _, _d] = q.dims();
 
+        debug!(
+            "Layer {} TauAttn: scaled_tau_attention_decode enter tq={} tk={} Q={:?} lambda_k={:?} V={:?}",
+            self.layer_idx,
+            tq,
+            tk,
+            q.dims(),
+            lambda_k.dims(),
+            v.dims()
+        );
+
         // MQA expansion (decode path receives lambda_k already computed/cached at Hkv)
         let (lambda_k, v) = if self.nhead != self.nkv_head {
+            debug!(
+                "Layer {} TauAttn decode: MQA expand lambda_k and V (nhead={} nkv_head={})",
+                self.layer_idx, self.nhead, self.nkv_head
+            );
             (
                 crate::taumode::mqa_expand_heads_3(lambda_k, self.nhead, self.nkv_head),
                 mqa_expand_heads_4(v, self.nhead, self.nkv_head),
@@ -379,27 +649,67 @@ impl<B: Backend> TauModeAttention<B> {
             (lambda_k, v)
         };
 
+        debug!(
+            "Layer {} TauAttn decode: after MQA expand lambda_k={:?} V={:?}",
+            self.layer_idx,
+            lambda_k.dims(),
+            v.dims()
+        );
+
         // Compute lambda_q via the unified helper (prefer sparse if present)
         let tau_config = self.get_tau_config();
         let lambda_q = self.lambdas_from_heads_any(q);
 
+        debug!(
+            "Layer {} TauAttn decode: lambda_q dims={:?} lambda_k dims={:?}",
+            self.layer_idx,
+            lambda_q.dims(),
+            lambda_k.dims()
+        );
+
         // Build attention logits
         let mut att = taumode_distance_logits(lambda_q, lambda_k, &tau_config);
+        debug!(
+            "Layer {} TauAttn decode: att logits dims={:?} (before causal mask)",
+            self.layer_idx,
+            att.dims()
+        );
 
         // Causal mask + stable softmax
         let diag = (tk as i64) - (tq as i64);
         let mask_2d: Tensor<B, 2, Bool> = Tensor::tril_mask([tq, tk], diag, &att.device());
-
+        let mask_2d_dims = mask_2d.dims();
         let mask_4d = mask_2d
             .unsqueeze_dims::<4>(&[0, 1])
             .expand([b, self.nhead, tq, tk]);
+
+        debug!(
+            "Layer {} TauAttn decode: mask dims mask_2d={:?} mask_4d={:?} diag={}",
+            self.layer_idx,
+            mask_2d_dims,
+            mask_4d.dims(),
+            diag
+        );
+
         att = att.mask_fill(mask_4d, -1.0e9);
 
         let att_max = att.clone().max_dim(3).squeeze::<3>(3);
         att = att - att_max.unsqueeze_dim::<4>(3);
         let att = activation::softmax(att, 3);
 
+        debug!(
+            "Layer {} TauAttn decode: att probs dims={:?} (after softmax)",
+            self.layer_idx,
+            att.dims()
+        );
+
         // Weighted sum
-        att.matmul(v)
+        let out = att.matmul(v);
+        debug!(
+            "Layer {} TauAttn decode: weighted sum output dims={:?}",
+            self.layer_idx,
+            out.dims()
+        );
+        out
     }
 }

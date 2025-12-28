@@ -6,6 +6,7 @@ use burn::tensor::Tensor;
 type TestBackend = AutoBackend;
 
 fn test_config() -> NanoChatConfig {
+    crate::init();
     NanoChatConfig {
         vocab_size: 1000,
         n_layer: 2,
@@ -45,14 +46,24 @@ fn test_tau_config_values() {
 }
 
 #[test]
+fn test_laplacian_tensor_stored() {
+    let device = Default::default();
+    let config = test_config();
+
+    let attn = TauModeAttention::<TestBackend>::new(&config, 0, &device);
+    let lap = attn.get_laplacian_tensor();
+
+    assert_eq!(lap.val().dims(), [32, 32]);
+}
+
+#[test]
+#[should_panic]
 fn test_laplacian_matrix_stored() {
     let device = Default::default();
     let config = test_config();
 
     let attn = TauModeAttention::<TestBackend>::new(&config, 0, &device);
-    let lap = attn.get_laplacian();
-
-    assert_eq!(lap.dim(), 32);
+    attn.get_laplacian_matrix();
 }
 
 #[test]
@@ -192,10 +203,12 @@ fn test_get_helpers_reconstruct_correctly() {
     let config = test_config();
     let attn = TauModeAttention::<TestBackend>::new(&config, 0, &device);
 
-    let lap = attn.get_laplacian();
+    let lap = attn.get_laplacian_tensor();
     let tau_config = attn.get_tau_config();
 
-    assert_eq!(lap.dim(), 32);
+    // Laplacian is a 2D matrix [D, D]
+    assert_eq!(lap.val().dims(), [32, 32]); // or check rows/cols separately
+
     assert_eq!(tau_config.tau, 1.0);
     assert_eq!(tau_config.eps, 1.0e-6);
     assert_eq!(tau_config.temperature, 1.0);
