@@ -204,7 +204,6 @@ fn test_taumode_distance_logits_negative() {
 #[test]
 fn test_taumode_distance_diagonal_zero() {
     let device = Default::default();
-    let (b, h, t) = (1, 1, 4);
 
     let lambda: Tensor<TestBackend, 3> = Tensor::from_floats([[[0.3, 0.5, 0.7, 0.9]]], &device);
 

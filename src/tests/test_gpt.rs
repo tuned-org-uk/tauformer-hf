@@ -13,7 +13,7 @@ use log::debug;
 use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor};
 
-use crate::{backend::AutoBackend, config::NanoChatConfig, gpt::GptModel};
+use crate::{backend::AutoBackend, causalattention::GptModel, config::NanoChatConfig};
 
 type TestBackend = AutoBackend;
 

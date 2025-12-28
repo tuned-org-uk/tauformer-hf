@@ -1,7 +1,7 @@
 // examples/generate.rs
 use burn::tensor::{Int, Tensor};
 use tauformer::{
-    backend::AutoBackend as B, config::NanoChatConfig, gpt::GptModel, pretraining,
+    backend::AutoBackend as B, causalattention::GptModel, config::NanoChatConfig, pretraining,
     taugpt::TauGptModel,
 };
 

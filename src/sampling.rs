@@ -4,8 +4,66 @@
 //!
 //! Returns token IDs as [B, 1] shaped tensors for consistent batch handling
 
-use burn::tensor::{activation, backend::Backend, Bool, Int, Tensor, TensorData};
+use burn::tensor::{Bool, Int, Tensor, TensorData, activation, backend::Backend};
 use log::debug;
+
+#[derive(Clone, Copy)]
+pub struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    pub fn new(seed: u64) -> Self {
+        // Avoid the all-zero state.
+        let s = if seed == 0 { 0x9E3779B97F4A7C15 } else { seed };
+        Self { state: s }
+    }
+
+    #[inline]
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
+    }
+
+    #[inline]
+    pub fn next_f32(&mut self) -> f32 {
+        // Use top 24 bits -> [0,1)
+        let v = (self.next_u64() >> 40) as u32; // 24 bits
+        (v as f32) * (1.0 / (1u32 << 24) as f32)
+    }
+}
+
+#[inline]
+fn sample_multinomial_row(probs: &[f32], rng: &mut XorShift64) -> usize {
+    let mut r = rng.next_f32();
+    let mut cum = 0.0f32;
+
+    for (i, &p) in probs.iter().enumerate() {
+        cum += p;
+        if r <= cum {
+            return i;
+        }
+    }
+    // Numerical fallback
+    probs.len().saturating_sub(1)
+}
+
+fn sample_from_probs<B: Backend>(probs: Tensor<B, 2>, rng: &mut XorShift64) -> Tensor<B, 2, Int> {
+    let [b, v] = probs.dims();
+    let host: Vec<f32> = probs.to_data().to_vec().unwrap();
+
+    let mut out: Vec<i64> = Vec::with_capacity(b);
+    for bi in 0..b {
+        let row = &host[bi * v..(bi + 1) * v];
+        out.push(sample_multinomial_row(row, rng) as i64);
+    }
+
+    Tensor::<B, 1, Int>::from_data(TensorData::new(out, [b]), &probs.device()).reshape([b, 1])
+}
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Temperature scaling
@@ -30,18 +88,33 @@ pub fn apply_temperature<B: Backend>(logits: Tensor<B, 2>, temperature: f64) -> 
 
 pub fn top_k_filter<B: Backend>(logits: Tensor<B, 2>, k: usize) -> Tensor<B, 2> {
     let [batch, vocab] = logits.dims();
-
     if k == 0 || k >= vocab {
         return logits;
     }
 
-    debug!("Applying top-k filter: k={}, vocab={}", k, vocab);
+    // CPU pass: compute kth-largest threshold per row.
+    let host: Vec<f32> = logits.to_data().to_vec().unwrap();
+    let mut keep_mask = vec![false; batch * vocab];
 
-    let topk_vals = logits.clone().sort_with_indices(1).0;
-    let kth_val = topk_vals.narrow(1, vocab - k, 1);
-    let mask = logits.clone().greater_equal(kth_val.expand([batch, vocab]));
+    for b in 0..batch {
+        // Build (value, idx) pairs for this row
+        let mut pairs: Vec<(f32, usize)> = (0..vocab).map(|v| (host[b * vocab + v], v)).collect();
 
-    logits.mask_fill(mask.bool_not(), f64::NEG_INFINITY)
+        // Sort descending by value (largest first)
+        pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        // kth largest value is at index (k-1)
+        let kth_val = pairs[k - 1].0;
+
+        // Keep all entries >= kth_val (handles ties deterministically)
+        for v in 0..vocab {
+            keep_mask[b * vocab + v] = host[b * vocab + v] >= kth_val;
+        }
+    }
+
+    let keep_data = TensorData::new(keep_mask, [batch, vocab]);
+    let keep = Tensor::<B, 2, Bool>::from_data(keep_data, &logits.device());
+    logits.mask_fill(keep.bool_not(), f64::NEG_INFINITY)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -60,14 +133,13 @@ pub fn top_p_filter<B: Backend>(logits: Tensor<B, 2>, p: f64) -> Tensor<B, 2> {
 
     let probs = activation::softmax(logits.clone(), 1);
     let probs_host: Vec<f32> = probs.to_data().to_vec().unwrap();
-    
+
     // Build keep mask as bools directly
     let mut keep_mask_bool: Vec<bool> = vec![false; batch * vocab];
 
     for b in 0..batch {
-        let mut pairs: Vec<(f32, usize)> = (0..vocab)
-            .map(|v| (probs_host[b * vocab + v], v))
-            .collect();
+        let mut pairs: Vec<(f32, usize)> =
+            (0..vocab).map(|v| (probs_host[b * vocab + v], v)).collect();
         pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
         let mut cum = 0.0f32;
@@ -107,45 +179,47 @@ pub fn sample_greedy<B: Backend>(logits: Tensor<B, 2>) -> Tensor<B, 2, Int> {
 pub fn sample_with_policy<B: Backend>(
     logits_last: Tensor<B, 2>,
     policy: SamplingPolicy,
+    rng: &mut XorShift64,
 ) -> Tensor<B, 2, Int> {
     use SamplingPolicy::*;
-    debug!("Sampling with policy: {:?}", policy);
 
     match policy {
         Greedy => sample_greedy(logits_last),
+
         Temperature { t } => {
             let logits = apply_temperature(logits_last, t);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
+
         TopK { k } => {
             let logits = top_k_filter(logits_last, k);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
+
         TopP { p } => {
             let logits = top_p_filter(logits_last, p);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
+
         TempTopK { t, k } => {
-            let logits = apply_temperature(logits_last, t);
-            let logits = top_k_filter(logits, k);
+            let logits = top_k_filter(apply_temperature(logits_last, t), k);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
+
         TempTopP { t, p } => {
-            let logits = apply_temperature(logits_last, t);
-            let logits = top_p_filter(logits, p);
+            let logits = top_p_filter(apply_temperature(logits_last, t), p);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
+
         TempTopKTopP { t, k, p } => {
-            let logits = apply_temperature(logits_last, t);
-            let logits = top_k_filter(logits, k);
-            let logits = top_p_filter(logits, p);
+            let logits = top_p_filter(top_k_filter(apply_temperature(logits_last, t), k), p);
             let probs = activation::softmax(logits, 1);
-            probs.argmax(1)
+            sample_from_probs(probs, rng)
         }
     }
 }

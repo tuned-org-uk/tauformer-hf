@@ -16,7 +16,7 @@ use log::{debug, info};
 use crate::{
     backend::AutoBackend,
     config::NanoChatConfig,
-    gpt::CausalSelfAttention,
+    causalattention::CausalSelfAttention,
     pretraining::{DomainManifold, load_domain_manifold},
     tauattention::{TauCacheLayer, TauModeAttention},
 };

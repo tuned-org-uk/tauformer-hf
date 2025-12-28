@@ -4,7 +4,7 @@
 use burn::tensor::Tensor;
 use log::{debug, info};
 
-use crate::gpt::CausalSelfAttention;
+use crate::causalattention::CausalSelfAttention;
 use crate::tauattention::{TauCacheLayer, TauModeAttention};
 use crate::{backend::AutoBackend, config::NanoChatConfig};
 

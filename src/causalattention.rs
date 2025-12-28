@@ -16,6 +16,7 @@ use log::{debug, info, trace};
 use std::path::Path;
 
 use crate::config::NanoChatConfig;
+use crate::engine::GptCache;
 use crate::rope::{apply_rotary_emb, apply_rotary_emb_step, precompute_rotary_embeddings};
 
 // ─────────────────────────────────────────────────────────────────────────────

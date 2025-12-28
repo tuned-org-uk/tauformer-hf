@@ -3,7 +3,7 @@ use burn::tensor::Tensor;
 
 use crate::backend::AutoBackend;
 use crate::config::NanoChatConfig;
-use crate::gpt::CausalSelfAttention;
+use crate::causalattention::CausalSelfAttention;
 use crate::rope::precompute_rotary_embeddings;
 use crate::tauattention::{TauCacheLayer, TauModeAttention};
 

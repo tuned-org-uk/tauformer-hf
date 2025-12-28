@@ -18,10 +18,10 @@
 // limitations under the License.
 
 pub mod backend;
+pub mod causalattention;
 pub mod checkpoint;
 pub mod config;
 pub mod engine;
-pub mod gpt;
 pub mod sampling;
 pub mod tokenizer;
 pub use checkpoint::{load_checkpoint, load_weights, save_checkpoint, save_weights};
@@ -75,7 +75,7 @@ pub fn init() {
 pub mod prelude {
     pub use crate::{
         backend::{AutoBackend, get_device},
+        causalattention::GptModel,
         config::NanoChatConfig,
-        gpt::GptModel,
     };
 }

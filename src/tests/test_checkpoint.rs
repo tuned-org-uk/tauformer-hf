@@ -1,8 +1,8 @@
-use crate::checkpoint::*;
-use crate::gpt::GptModel;
 use crate::NanoChatConfig;
-use tempfile::TempDir;
+use crate::causalattention::GptModel;
+use crate::checkpoint::*;
 use burn::prelude::*;
+use tempfile::TempDir;
 
 type TestBackend = crate::backend::AutoBackend;
 
@@ -35,8 +35,7 @@ fn test_save_and_load_checkpoint() {
 
     // Verify same forward output (weights preserved)
     use burn::tensor::{Int, Tensor};
-    let ids = Tensor::<TestBackend, 1, Int>::from_ints([1, 2, 3], &device)
-        .reshape([1, 3]);
+    let ids = Tensor::<TestBackend, 1, Int>::from_ints([1, 2, 3], &device).reshape([1, 3]);
 
     let logits1 = model.forward(ids.clone(), false);
     let logits2 = loaded_model.forward(ids, false);
@@ -52,4 +51,3 @@ fn test_save_and_load_checkpoint() {
         "Loaded model weights should match original"
     );
 }
-

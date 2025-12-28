@@ -4,11 +4,13 @@ use tempfile::TempDir;
 
 use tauformer::{
     backend::{AutoBackend, get_device, print_backend_info},
+    causalattention::GptModel,
     checkpoint::{load_checkpoint, save_checkpoint},
     config::NanoChatConfig,
     engine::{Engine, KVCache},
-    gpt::GptModel,
-    sampling::{SamplingPolicy, extract_last_logits, sample_with_policy},
+    sampling::{
+        SamplingPolicy, XorShift64, extract_last_logits, sample_greedy, sample_with_policy,
+    },
 };
 
 fn main() -> Result<()> {
@@ -85,25 +87,43 @@ fn main() -> Result<()> {
 
     let last_logits = extract_last_logits(logits_with_cap.clone());
 
-    let greedy = sample_with_policy(last_logits.clone(), SamplingPolicy::Greedy);
-    println!("   Greedy: {:?}", greedy.to_data().to_vec::<i32>().unwrap());
+    let mut rng = XorShift64::new(42);
 
-    let temp = sample_with_policy(last_logits.clone(), SamplingPolicy::Temperature { t: 0.8 });
+    // Greedy (no RNG needed)
+    let greedy = sample_greedy(last_logits.clone());
+    println!("   Greedy: {:?}", greedy.to_data().to_vec::<i64>().unwrap());
+
+    // Temperature (stochastic)
+    let temp = sample_with_policy(
+        last_logits.clone(),
+        SamplingPolicy::Temperature { t: 0.8 },
+        &mut rng,
+    );
     println!(
         "   Temperature (0.8): {:?}",
-        temp.to_data().to_vec::<i32>().unwrap()
+        temp.to_data().to_vec::<i64>().unwrap()
     );
 
-    let topk = sample_with_policy(last_logits.clone(), SamplingPolicy::TopK { k: 10 });
+    // Top-K (stochastic over the filtered support)
+    let topk = sample_with_policy(
+        last_logits.clone(),
+        SamplingPolicy::TopK { k: 10 },
+        &mut rng,
+    );
     println!(
         "   Top-K (k=10): {:?}",
-        topk.to_data().to_vec::<i32>().unwrap()
+        topk.to_data().to_vec::<i64>().unwrap()
     );
 
-    let topp = sample_with_policy(last_logits.clone(), SamplingPolicy::TopP { p: 0.9 });
+    // Top-P (stochastic over the nucleus)
+    let topp = sample_with_policy(
+        last_logits.clone(),
+        SamplingPolicy::TopP { p: 0.9 },
+        &mut rng,
+    );
     println!(
         "   Top-P (p=0.9): {:?}",
-        topp.to_data().to_vec::<i32>().unwrap()
+        topp.to_data().to_vec::<i64>().unwrap()
     );
 
     println!("   ✓ All sampling policies functional\n");
@@ -119,6 +139,7 @@ fn main() -> Result<()> {
     println!("   Prefill logits shape: {:?}", prefill_logits.dims());
 
     // Decode with cache
+    use tauformer::engine::GptCache;
     let mut cache = KVCache::<AutoBackend>::new(cfg.n_layer);
     let last_id = input.clone().slice([0..1, 4..5]);
 

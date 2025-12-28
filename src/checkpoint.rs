@@ -13,8 +13,8 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
+use crate::causalattention::GptModel;
 use crate::config::NanoChatConfig;
-use crate::gpt::GptModel;
 
 /// Checkpoint container with config and model record
 #[derive(Serialize, Deserialize)]
@@ -80,10 +80,7 @@ pub fn load_checkpoint<B: Backend>(
 }
 
 /// Save only model weights (for fine-tuning scenarios where config is known)
-pub fn save_weights<B: Backend>(
-    model: &GptModel<B>,
-    weights_path: impl AsRef<Path>,
-) -> Result<()> {
+pub fn save_weights<B: Backend>(model: &GptModel<B>, weights_path: impl AsRef<Path>) -> Result<()> {
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
     model
         .clone()

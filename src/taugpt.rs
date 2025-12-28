@@ -11,8 +11,8 @@ use burn::{
 };
 use log::{debug, info};
 
+use crate::causalattention::rms_norm;
 use crate::config::NanoChatConfig;
-use crate::gpt::rms_norm;
 use crate::rope::precompute_rotary_embeddings;
 use crate::tauattention::{TauCacheLayer, TauModeAttention};
 use sprs::CsMat;

@@ -7,14 +7,13 @@ use burn::{
     prelude::Backend,
     tensor::{Bool, Tensor, activation},
 };
-use log::{debug, info, trace};
+use log::{debug, info};
 
+use crate::causalattention::rms_norm;
 use crate::config::NanoChatConfig;
-use crate::gpt::rms_norm;
 use crate::rope::{apply_rotary_emb, apply_rotary_emb_step};
 use crate::taumode::{
-    FeatureLaplacian, TauModeConfig, lambdas_from_heads, lambdas_from_heads_sparse,
-    mqa_expand_heads_4, taumode_distance_logits,
+    FeatureLaplacian, TauModeConfig, mqa_expand_heads_4, taumode_distance_logits,
 };
 use sprs::CsMat;
 use std::sync::Arc;

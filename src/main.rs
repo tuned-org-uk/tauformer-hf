@@ -4,7 +4,7 @@ use burn::tensor::{Int, Tensor};
 use tauformer::{
     backend::{AutoBackend, get_device, print_backend_info},
     config::NanoChatConfig,
-    gpt::GptModel,
+    causalattention::GptModel,
 };
 
 fn main() -> Result<()> {

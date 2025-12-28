@@ -153,8 +153,8 @@ pub fn taumode_distance_logits<B: Backend>(
     lambda_k: Tensor<B, 3>,
     cfg: &TauModeConfig,
 ) -> Tensor<B, 4> {
-    let [bq, hq, tq] = lambda_q.dims();
-    let [bk, hk, tk] = lambda_k.dims();
+    let [bq, hq, _tq] = lambda_q.dims();
+    let [bk, hk, _tk] = lambda_k.dims();
     debug_assert_eq!(bq, bk);
     debug_assert_eq!(hq, hk);
 
@@ -193,37 +193,6 @@ pub fn causal_softmax_over_keys<B: Backend>(
 
     // 3) softmax over keys
     activation::softmax(att, 3)
-}
-
-/// Compute per-vector Rayleigh quotient x^T L x / x^T x for a CSR matrix L.
-/// Ported from `arrowspace`.
-///
-/// Notes:
-/// - `L` is expected to be the *full Laplacian* (already L = D - A), as you stated. [file:27]
-/// - Returns >= 0 by clamping, consistent with ArrowSpace. [file:27]
-fn rayleigh_csr_f32(l: &CsMat<f64>, x: &[f32]) -> f32 {
-    debug_assert_eq!(l.rows(), l.cols());
-    debug_assert_eq!(l.rows(), x.len());
-
-    // numerator = Σ_i Σ_{j in nnz(i)} x_i * L_ij * x_j
-    let numerator: f64 = l
-        .outer_iterator()
-        .enumerate()
-        .map(|(i, row)| {
-            let xi = x[i] as f64;
-            row.iter()
-                .map(|(j, &lij)| xi * lij * (x[j] as f64))
-                .sum::<f64>()
-        })
-        .sum();
-
-    let denom: f64 = x.iter().map(|&v| (v as f64) * (v as f64)).sum();
-
-    if denom > 1e-12 {
-        ((numerator / denom).max(0.0)) as f32
-    } else {
-        0.0
-    }
 }
 
 use crate::pretraining::parquet::TauMode as ManifoldTauMode;
