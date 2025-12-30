@@ -274,7 +274,7 @@ pub fn new(config: &NanoChatConfig, layer_idx: usize, device: &B::Device) -> Sel
     let laplacian = crate::taumode::laplacian_chain_dense::<B>(head_dim, device);
     let tau_config = TauModeConfig::default();
 
-    info!(
+    debug!(
         "Layer {} TauAttn: Laplacian dim={}, tau={}, temperature={}",
         layer_idx,
         laplacian.dim(),

@@ -17,6 +17,7 @@ use std::path::Path;
 
 use crate::backend::AutoBackend;
 use crate::config::NanoChatConfig;
+use crate::engine::GptCache;
 use crate::pretraining::parquet::{DomainManifold, load_domain_manifold};
 use crate::taugpt::{TauGptModel, TauKVCache};
 
@@ -134,19 +135,21 @@ fn run_forward_decode_equivalence(cfg: NanoChatConfig) {
     assert_logits_finite(&logits_fwd);
 
     // Decode the same sequence token-by-token and compare logits at each position.
+    // Engine-driven cache position: caller must advance after each decode step. [file:53]
     let mut cache = TauKVCache::<B>::new(model.num_layers());
     cache.reset();
 
     for pos in 0..t {
         let last = idx.clone().slice([0..bsz, pos..pos + 1]); // [B,1]
         let logits_step = model.forward_decode(last, &mut cache, false); // [B,1,V]
+        cache.advance(); // <-- NEW: external position advance
 
         assert_eq!(logits_step.dims(), [bsz, 1, v]);
         assert_logits_finite(&logits_step);
 
         let logits_fwd_pos = logits_fwd.clone().slice([0..bsz, pos..pos + 1, 0..v]); // [B,1,V]
-        let mad = max_abs_diff(logits_step, logits_fwd_pos);
 
+        let mad = max_abs_diff(logits_step, logits_fwd_pos);
         assert!(
             mad < 1e-6,
             "forward/decode logits mismatch at pos={}, max_abs_diff={}",

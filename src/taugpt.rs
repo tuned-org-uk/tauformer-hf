@@ -293,7 +293,6 @@ impl<B: Backend> TauGptModel<B> {
             logits = logits.clamp(-50.0, 50.0);
         }
 
-        cache.position += 1;
         logits
     }
 

@@ -62,7 +62,7 @@ impl<B: Backend> TauModeAttention<B> {
             "Invalid MQA config"
         );
 
-        info!(
+        debug!(
             "Layer {} TauAttn: nhead={}, nkv_head={}, head_dim={}",
             layer_idx, nhead, nkv_head, head_dim
         );
@@ -80,7 +80,7 @@ impl<B: Backend> TauModeAttention<B> {
         let laplacian = crate::taumode::laplacian_chain_dense::<B>(head_dim, device);
         let tau_config = TauModeConfig::default();
 
-        info!(
+        debug!(
             "Layer {} TauAttn: Laplacian dim={}, tau={}, temperature={}",
             layer_idx,
             laplacian.dim(),
@@ -140,7 +140,7 @@ impl<B: Backend> TauModeAttention<B> {
             laplacian.cols(),
             "manifold Laplacian must be square"
         );
-        info!(
+        debug!(
             "Layer {} TauAttn: new_with_laplacian using sparse laplacian rows={} cols={} nnz={} tau_mode={:?}",
             layer_idx,
             laplacian.rows(),
@@ -245,7 +245,7 @@ impl<B: Backend> TauModeAttention<B> {
                 .0
                 .unwrap_or(crate::pretraining::parquet::TauMode::Median);
 
-            info!(
+            debug!(
                 "Layer {} TauAttn: computing lambdas via SPARSE laplacian rows={} cols={} nnz={} mode={:?} eps={}",
                 self.layer_idx,
                 lap.rows(),
@@ -260,7 +260,7 @@ impl<B: Backend> TauModeAttention<B> {
             let lap = self.get_laplacian_tensor().clone();
             let [lr, lc] = lap.val().dims();
 
-            info!(
+            debug!(
                 "Layer {} TauAttn: computing lambdas via DENSE laplacian dims=({},{}) tau={} eps={} temperature={}",
                 self.layer_idx, lr, lc, tau_cfg.tau, tau_cfg.eps, tau_cfg.temperature
             );

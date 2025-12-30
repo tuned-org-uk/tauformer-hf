@@ -71,7 +71,7 @@ impl<B: Backend> CausalSelfAttention<B> {
             "Invalid MQA config"
         );
 
-        info!(
+        debug!(
             "Layer {}: Attn n_head={}, n_kv_head={}, head_dim={}",
             layer_idx, n_head, n_kv_head, head_dim
         );
