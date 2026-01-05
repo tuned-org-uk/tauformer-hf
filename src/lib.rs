@@ -1,8 +1,5 @@
-//! NanoChat - A GPT implementation in Rust using Burn
+//! Tauformer - A GPT implementation
 //!
-//! This library provides a complete implementation of the NanoChat model
-//! with modern features like rotary embeddings, Multi-Query Attention,
-//! and efficient KV caching.
 // Copyright [2025] tuned.org.uk, Mec-iS
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
