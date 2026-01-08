@@ -1,4 +1,5 @@
 mod test_attention_accuracy;
+mod test_attention_stability;
 mod test_causal_taumode;
 mod test_checkpoint;
 mod test_compare;
