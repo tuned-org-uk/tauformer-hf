@@ -9,7 +9,7 @@ use burn::{
     nn::{Embedding, EmbeddingConfig, LayerNorm, LayerNormConfig, Linear, LinearConfig},
     tensor::{Int, Tensor, activation, backend::Backend},
 };
-use log::{debug, info};
+use log::{debug, info, trace};
 use std::path::Path;
 
 use crate::causalattention::rms_norm;
@@ -225,32 +225,78 @@ impl<B: Backend> TauGptModel<B> {
     /// Full forward (prefill): idx [B,T] -> logits [B,T,V].
     pub fn forward(&self, idx: Tensor<B, 2, Int>, use_softcap: bool) -> Tensor<B, 3> {
         let [b, t] = idx.dims();
-        debug!("TauGptModel.forward: B={}, T={}", b, t);
+        debug!(
+            "TauGptModel.forward: enter B={}, T={}, n_embd={}, n_layer={}, use_softcap={}",
+            b, t, self.nembd, self.nlayer, use_softcap
+        );
 
-        let mut x = self.wte.forward(idx).reshape([b, t, self.nembd]);
+        debug!("TauGptModel.forward: wte.forward(idx)...");
+        let mut x = self.wte.forward(idx);
+        debug!("TauGptModel.forward: wte out dims={:?}", x.dims());
 
-        for block in self.blocks.iter() {
+        debug!(
+            "TauGptModel.forward: reshape embeddings -> [B,T,C]=[{}, {}, {}]",
+            b, t, self.nembd
+        );
+        x = x.reshape([b, t, self.nembd]);
+        debug!("TauGptModel.forward: x dims after reshape={:?}", x.dims());
+
+        // RoPE cache dims sanity (useful when mismatched seq_len shows up).
+        debug!(
+            "TauGptModel.forward: RoPE cache cos dims={:?}, sin dims={:?}",
+            self.cos.dims(),
+            self.sin.dims()
+        );
+
+        for (i, block) in self.blocks.iter().enumerate() {
+            debug!("TauGptModel.forward: entering block {}", i);
+            trace!(
+                "TauGptModel.forward: x dims before block {}: {:?}",
+                i,
+                x.dims()
+            );
             x = block.forward(x, (&self.cos, &self.sin));
+            trace!(
+                "TauGptModel.forward: x dims after block {}: {:?}",
+                i,
+                x.dims()
+            );
         }
 
+        debug!("TauGptModel.forward: rms_norm...");
         let x = rms_norm(x, 1e-6);
-        let mut logits = self.lmhead.forward(x);
+        trace!("TauGptModel.forward: x dims after rms_norm={:?}", x.dims());
 
-        // Keep the same safety clamps/softcap pattern style as `gpt.rs`.
+        debug!("TauGptModel.forward: lmhead.forward...");
+        let mut logits = self.lmhead.forward(x);
+        trace!(
+            "TauGptModel.forward: logits dims after lmhead={:?}",
+            logits.dims()
+        );
+
+        debug!("TauGptModel.forward: clamp logits to [-50,50] (pre-softcap)");
         logits = logits.clamp(-50.0, 50.0);
+
         if use_softcap {
             let softcap = 15.0;
+            debug!("TauGptModel.forward: applying softcap={}", softcap);
             logits = logits
                 .clone()
                 .div_scalar(softcap)
                 .tanh()
                 .mul_scalar(softcap);
+            debug!("TauGptModel.forward: clamp logits to [-50,50] (post-softcap)");
             logits = logits.clamp(-50.0, 50.0);
+        } else {
+            debug!("TauGptModel.forward: softcap disabled");
         }
+
+        debug!("TauGptModel.forward: exit logits dims={:?}", logits.dims());
         logits
     }
 
     pub fn forward_no_softcap(&self, idx: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+        debug!("TauGptModel.forward_no_softcap: delegating to forward(use_softcap=false)");
         self.forward(idx, false)
     }
 
@@ -264,35 +310,120 @@ impl<B: Backend> TauGptModel<B> {
         let [b, tq] = last_ids.dims();
         debug_assert_eq!(tq, 1);
 
+        debug!(
+            "TauGptModel.forward_decode: enter B={}, tq={}, cache.position={}, n_layer={}, n_embd={}, use_softcap={}",
+            b, tq, cache.position, self.nlayer, self.nembd, use_softcap
+        );
+
+        // Helpful for diagnosing OOB / mismatch between seq_len and decode steps.
+        debug!(
+            "TauGptModel.forward_decode: RoPE cache cos dims={:?}, sin dims={:?}",
+            self.cos.dims(),
+            self.sin.dims()
+        );
+
         let tpos = cache.position;
         let d2 = self.cos.dims()[3];
+        debug!("TauGptModel.forward_decode: tpos={}, d2={}", tpos, d2);
 
         // Slice RoPE for the current absolute position: [1,1,1,D/2]
+        debug!(
+            "TauGptModel.forward_decode: slicing RoPE cos/sin at tpos..tpos+1 = {}..{}",
+            tpos,
+            tpos + 1
+        );
         let cos_step = self.cos.clone().slice([0..1, tpos..tpos + 1, 0..1, 0..d2]);
         let sin_step = self.sin.clone().slice([0..1, tpos..tpos + 1, 0..1, 0..d2]);
+        debug!(
+            "TauGptModel.forward_decode: cos_step dims={:?}, sin_step dims={:?}",
+            cos_step.dims(),
+            sin_step.dims()
+        );
 
         // Embed last token -> [B,1,C]
-        let mut x = self.wte.forward(last_ids).reshape([b, 1, self.nembd]);
+        debug!("TauGptModel.forward_decode: wte.forward(last_ids)...");
+        let mut x = self.wte.forward(last_ids);
+        debug!("TauGptModel.forward_decode: wte out dims={:?}", x.dims());
+
+        debug!(
+            "TauGptModel.forward_decode: reshape embeddings -> [B,1,C]=[{}, 1, {}]",
+            b, self.nembd
+        );
+        x = x.reshape([b, 1, self.nembd]);
+        debug!(
+            "TauGptModel.forward_decode: x dims after reshape={:?}",
+            x.dims()
+        );
 
         for (i, block) in self.blocks.iter().enumerate() {
+            debug!(
+                "TauGptModel.forward_decode: entering block {} (cache layer present? {})",
+                i,
+                cache.store[i].is_some()
+            );
+            debug!(
+                "TauGptModel.forward_decode: x dims before block {}: {:?}",
+                i,
+                x.dims()
+            );
+
             let layer_cache = &mut cache.store[i];
             x = block.forward_decode(x, (&cos_step, &sin_step), layer_cache);
+
+            debug!(
+                "TauGptModel.forward_decode: x dims after block {}: {:?}",
+                i,
+                x.dims()
+            );
+            debug!(
+                "TauGptModel.forward_decode: exiting block {} (cache layer present? {})",
+                i,
+                layer_cache.is_some()
+            );
+
+            // (Optional but very useful when chasing cache growth bugs)
+            // NOTE: keep at debug or trace depending on verbosity preference.
+            trace!(
+                "TauGptModel.forward_decode: cache.position={} after block {} (note: position advanced outside forward_decode)",
+                cache.position, i
+            );
         }
 
+        debug!("TauGptModel.forward_decode: rms_norm...");
         let x = rms_norm(x, 1e-6);
-        let mut logits = self.lmhead.forward(x);
+        debug!(
+            "TauGptModel.forward_decode: x dims after rms_norm={:?}",
+            x.dims()
+        );
 
+        debug!("TauGptModel.forward_decode: lmhead.forward...");
+        let mut logits = self.lmhead.forward(x);
+        debug!(
+            "TauGptModel.forward_decode: logits dims after lmhead={:?}",
+            logits.dims()
+        );
+
+        debug!("TauGptModel.forward_decode: clamp logits to [-50,50] (pre-softcap)");
         logits = logits.clamp(-50.0, 50.0);
+
         if use_softcap {
             let softcap = 15.0;
+            debug!("TauGptModel.forward_decode: applying softcap={}", softcap);
             logits = logits
                 .clone()
                 .div_scalar(softcap)
                 .tanh()
                 .mul_scalar(softcap);
+            debug!("TauGptModel.forward_decode: clamp logits to [-50,50] (post-softcap)");
             logits = logits.clamp(-50.0, 50.0);
+        } else {
+            debug!("TauGptModel.forward_decode: softcap disabled");
         }
 
+        debug!(
+            "TauGptModel.forward_decode: exit logits dims={:?}",
+            logits.dims()
+        );
         logits
     }
 
