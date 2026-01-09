@@ -1,6 +1,6 @@
 [package]
 name = "tauformer"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A Transformer Architecture using arrowspace's taumode"
 authors = ["Lorenzo <tunedconsulting@gmail.com>"]
@@ -80,6 +80,9 @@ path = "src/main.rs"
 [[bench]]
 name = "attention"
 harness = false
+
+[[examples]]
+name = "01_generate"
 
 [profile.release]
 opt-level = 3
