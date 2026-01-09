@@ -1,3 +1,4 @@
 /target
 PLAN.md
 test_data/
+cve_corpus/train.jsonl
