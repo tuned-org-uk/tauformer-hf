@@ -1,5 +1,7 @@
 # Tauformer
 
+[![DOI](https://img.shields.io/badge/DOI-10.36227%2Ftechrxiv.176800983.30631144%2Fv1-blue)](https://doi.org/10.36227/techrxiv.176800983.30631144/v1)
+
 **A Transformer architecture using taumode attention for memory-efficient sequence modeling**
 
 Tauformer replaces standard inner-product attention with **taumode distance scoring**, compressing token representations into scalar synthetic indices derived from feature-space topological analysis. This enables constant-memory key storage while maintaining full attention expressiveness.
